@@ -1,4 +1,4 @@
-module squirrel
+module https://github.com/everly02/squirrel
 
 go 1.22
 
