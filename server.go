@@ -18,7 +18,7 @@ func NewServer() *Server {
 
 // Run 启动服务器
 func (s *Server) Run(addr string) error {
-	// 确保 Router 被初始化
+
 	if s.Router == nil {
 		return ErrNoRouter
 	}

@@ -3,9 +3,11 @@ package squirrel
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"mime/multipart"
 	"net/http"
+	"os"
 )
 
 type Context struct {
@@ -24,6 +26,41 @@ func NewContext(w http.ResponseWriter, r *http.Request, tmpl *Template) *Context
 		PathParams:     make(map[string]string),
 		Template:       tmpl,
 	}
+}
+
+func (c *Context) SaveUploadedFile(file *multipart.FileHeader, dst string) error {
+	src, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, src)
+	return err
+}
+
+func (c *Context) MultipartForm() error {
+	return c.Request.ParseMultipartForm(10 << 20) // 10 MB
+}
+
+// SaveFile 简化方式
+func (c *Context) SaveFile(formField, dstDir string) (string, error) {
+	file, err := c.FormFile(formField)
+	if err != nil {
+		return "", err
+	}
+
+	dst := dstDir + "/" + file.Filename
+	if err := c.SaveUploadedFile(file, dst); err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
 // Query 读取查询参数
@@ -51,8 +88,9 @@ func (c *Context) BindJSON(obj interface{}) error {
 }
 
 // FormFile 读取上传的文件
-func (c *Context) FormFile(key string) (multipart.File, *multipart.FileHeader, error) {
-	return c.Request.FormFile(key)
+func (c *Context) FormFile(name string) (*multipart.FileHeader, error) {
+	_, header, err := c.Request.FormFile(name)
+	return header, err
 }
 
 // SetHeader 设置响应头
