@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"sync"
 )
 
 type Context struct {
@@ -15,17 +16,40 @@ type Context struct {
 	Request        *http.Request
 	PathParams     map[string]string // 存储路径参数
 	StatusCode     int
-	Template       *Template
+	Template       *Template // 用于渲染 HTML 的模板
 }
 
 // NewContext 创建一个新的 Context 对象
 func NewContext(w http.ResponseWriter, r *http.Request, tmpl *Template) *Context {
-	return &Context{
-		ResponseWriter: w,
-		Request:        r,
-		PathParams:     make(map[string]string),
-		Template:       tmpl,
-	}
+	ctx := getContext()
+	ctx.ResponseWriter = w
+	ctx.Request = r
+	ctx.PathParams = make(map[string]string)
+	ctx.Template = tmpl
+	return ctx
+}
+
+// 初始化一个对象池用于 Context 对象的重用
+var contextPool = sync.Pool{
+	New: func() interface{} {
+		return &Context{}
+	},
+}
+
+// getContext 从对象池中获取一个 Context 对象
+func getContext() *Context {
+	return contextPool.Get().(*Context)
+}
+
+func putContext(ctx *Context) {
+	// 重置 Context 的状态
+	ctx.ResponseWriter = nil
+	ctx.Request = nil
+	ctx.PathParams = nil
+	ctx.StatusCode = 0
+	ctx.Template = nil
+
+	contextPool.Put(ctx)
 }
 
 func (c *Context) SaveUploadedFile(file *multipart.FileHeader, dst string) error {

@@ -8,6 +8,75 @@ import (
 
 type HandlerFunc func(ctx *Context)
 
+type node struct {
+	pattern  string  // 完整匹配的路由路径，例如 /p/:lang/doc
+	part     string  // 路径中的一部分，例如 :lang
+	children []*node // 子节点
+	isWild   bool    // 是否模糊匹配，part 含有 : 或 * 时为 true
+}
+
+// matchChild 匹配单个子节点，用于插入
+func (n *node) matchChild(part string) *node {
+	for _, child := range n.children {
+		if child.part == part || child.isWild {
+			return child
+		}
+	}
+	return nil
+}
+
+// matchChildren 匹配所有符合条件的子节点，用于查找
+func (n *node) matchChildren(part string) []*node {
+	nodes := make([]*node, 0)
+	for _, child := range n.children {
+		if child.part == part || child.isWild {
+			nodes = append(nodes, child)
+		}
+	}
+	return nodes
+}
+
+// insert 插入路由规则
+func (n *node) insert(pattern string, parts []string, height int) {
+	if len(parts) == height {
+		n.pattern = pattern
+		return
+	}
+
+	part := parts[height]
+	child := n.matchChild(part)
+	if child == nil {
+		child = &node{
+			part:   part,
+			isWild: part[0] == ':' || part[0] == '*',
+		}
+		n.children = append(n.children, child)
+	}
+	child.insert(pattern, parts, height+1)
+}
+
+// search 查找路由规则
+func (n *node) search(parts []string, height int) *node {
+	if len(parts) == height || strings.HasPrefix(n.part, "*") {
+		if n.pattern == "" {
+			return nil
+		}
+		return n
+	}
+
+	part := parts[height]
+	children := n.matchChildren(part)
+
+	for _, child := range children {
+		result := child.search(parts, height+1)
+		if result != nil {
+			return result
+		}
+	}
+
+	return nil
+}
+
 type route struct {
 	pattern *regexp.Regexp
 	params  []string
@@ -15,15 +84,17 @@ type route struct {
 }
 
 type Router struct {
-	routes      map[string][]route
-	middlewares []MiddlewareFunc
+	roots       map[string]*node       // 保存每种请求方式的 Trie 树根节点
+	handlers    map[string]HandlerFunc // 保存每个路由对应的处理函数
+	middlewares []MiddlewareFunc       // 中间件
 	template    *Template
 }
 
 func NewRouter(templatePattern string) *Router {
 	tmpl := NewTemplate(templatePattern)
 	return &Router{
-		routes:   make(map[string][]route),
+		roots:    make(map[string]*node),
+		handlers: make(map[string]HandlerFunc),
 		template: tmpl,
 	}
 }
@@ -43,41 +114,32 @@ func (r *Router) Use(middleware MiddlewareFunc) {
 	r.middlewares = append(r.middlewares, middleware)
 }
 
-// parsePattern parses a given path and returns a regular expression pattern and a list of parameter names.
-//
-// The function takes a path as input and splits it into segments using "/" as the delimiter. It then iterates over each segment and checks if it starts with ":". If it does, it treats it as a parameter and appends a regular expression pattern "([^/]+)" to the segments slice. It also appends the parameter name (without the ":") to the params slice. If the segment does not start with ":", it simply appends it to the segments slice.
-//
-// After iterating over all segments, the function joins the segments slice with "/" to form the pattern string. It then compiles the pattern string into a regular expression using regexp.MustCompile and returns it along with the params slice.
-//
-// Parameters:
-// - path: the path to be parsed (string)
-//
-// Returns:
-// - *regexp.Regexp: the compiled regular expression pattern (regexp.Regexp)
-// - []string: the list of parameter names ([]string)
-func parsePattern(path string) (*regexp.Regexp, []string) {
-	var segments []string
-	var params []string
-	for _, segment := range strings.Split(path, "/") {
-		if strings.HasPrefix(segment, ":") {
-			param := segment[1:]
-			segments = append(segments, `([^/]+)`)
-			params = append(params, param)
-		} else {
-			segments = append(segments, segment)
+func parsePattern(path string) []string {
+	vs := strings.Split(path, "/") // 将路径按 / 分割
+
+	parts := make([]string, 0) // 保存路径中的一部分
+	for _, item := range vs {  // 遍历路径的每一部分
+		if item != "" {
+			parts = append(parts, item)
+			if item[0] == ':' || item[0] == '*' {
+				parts = append(parts, item)
+			}
 		}
 	}
-	pattern := "^" + strings.Join(segments, "/") + "$"
-	return regexp.MustCompile(pattern), params
+	return parts
+
 }
 
 // AddRoute 添加路由和处理函数
 func (r *Router) AddRoute(method, path string, handler HandlerFunc) {
-	pattern, paramNames := parsePattern(path)
-	if _, exists := r.routes[method]; !exists {
-		r.routes[method] = []route{}
+	parts := parsePattern(path)
+
+	key := method + "-" + path
+	if _, ok := r.roots[method]; !ok {
+		r.roots[method] = &node{}
 	}
-	r.routes[method] = append(r.routes[method], route{pattern, paramNames, handler})
+	r.roots[method].insert(path, parts, 0)
+	r.handlers[key] = handler
 }
 
 // GET 注册 GET 方法的路由
@@ -100,28 +162,7 @@ func (r *Router) DELETE(path string, handler HandlerFunc) {
 
 // ServeHTTP 实现 http.Handler 接口
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	path := req.URL.Path
-	method := req.Method
 
-	if routes, ok := r.routes[method]; ok {
-		for _, route := range routes {
-			if matches := route.pattern.FindStringSubmatch(path); matches != nil {
-				ctx := NewContext(w, req, r.template)
-				ctx.PathParams = make(map[string]string)
-				for i, match := range matches[1:] {
-					ctx.PathParams[route.params[i]] = match
-				}
-				handler := route.handler
-				for i := len(r.middlewares) - 1; i >= 0; i-- {
-					handler = r.middlewares[i](handler)
-				}
-				handler(ctx)
-				return
-			}
-		}
-	}
-
-	http.NotFound(w, req)
 }
 
 // matchRoute 匹配路径参数
